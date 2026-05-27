@@ -1,0 +1,130 @@
+# Jitsi Meet self-hosted stack
+# Requires a domain + reverse proxy with SSL (WebRTC mandates HTTPS in production).
+# For local testing set DOCKER_HOST_ADDRESS to your machine's LAN IP.
+#
+# Env vars to set before running (copy to a .env file or export them):
+#   JITSI_SECRET        — shared secret between components (any random string)
+#   JITSI_JWT_APP_ID    — app identifier embedded in tokens (e.g. "sca-platform")
+#   JITSI_JWT_APP_SECRET— secret used to sign JWTs (keep this in the API .env too)
+#   PUBLIC_URL          — public-facing URL, e.g. https://meet.yourdomain.com
+#   DOCKER_HOST_ADDRESS — server's public/LAN IP (needed by the video bridge)
+
+services:
+  # ── Web (Nginx + Jitsi Meet UI) ──────────────────────────────────────────────
+  web:
+    image: jitsi/web:stable
+    container_name: jitsi-web
+    restart: unless-stopped
+    ports:
+      - "3000:443"   # HTTPS — map to 443 via your reverse proxy
+      # - "8080:80"    # HTTP  — redirect to HTTPS via your reverse proxy
+    environment:
+      - PUBLIC_URL=${PUBLIC_URL}
+      - XMPP_SERVER=prosody
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_BOSH_URL_BASE=http://prosody:5280
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - JICOFO_AUTH_USER=focus
+      - TZ=UTC
+      # JWT auth — must match what the API signs
+      - ENABLE_AUTH=1
+      - AUTH_TYPE=jwt
+      - JWT_APP_ID=${JITSI_JWT_APP_ID}
+      - JWT_APP_SECRET=${JITSI_JWT_APP_SECRET}
+      - JWT_ACCEPTED_ISSUERS=${JITSI_JWT_APP_ID}
+      - JWT_ACCEPTED_AUDIENCES=${JITSI_JWT_APP_ID}
+    volumes:
+      - jitsi_web_config:/config
+    networks:
+      - jitsi
+
+  # ── Prosody (XMPP server) ────────────────────────────────────────────────────
+  prosody:
+    image: jitsi/prosody:stable
+    container_name: jitsi-prosody
+    restart: unless-stopped
+    expose:
+      - "5222"
+      - "5280"
+      - "5347"
+    environment:
+      - AUTH_TYPE=jwt
+      - JWT_APP_ID=${JITSI_JWT_APP_ID}
+      - JWT_APP_SECRET=${JITSI_JWT_APP_SECRET}
+      - JWT_ACCEPTED_ISSUERS=${JITSI_JWT_APP_ID}
+      - JWT_ACCEPTED_AUDIENCES=${JITSI_JWT_APP_ID}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JICOFO_COMPONENT_SECRET=${JITSI_SECRET}
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=${JITSI_SECRET}
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=${JITSI_SECRET}
+      - TZ=UTC
+    volumes:
+      - jitsi_prosody_config:/config
+      - jitsi_prosody_plugins:/prosody-plugins-custom
+    networks:
+      - jitsi
+
+  # ── Jicofo (conference focus) ────────────────────────────────────────────────
+  jicofo:
+    image: jitsi/jicofo:stable
+    container_name: jitsi-jicofo
+    restart: unless-stopped
+    depends_on:
+      - prosody
+    environment:
+      - AUTH_TYPE=jwt
+      - XMPP_SERVER=prosody
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JICOFO_COMPONENT_SECRET=${JITSI_SECRET}
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=${JITSI_SECRET}
+      - JVB_BREWERY_MUC=jvbbrewery
+      - TZ=UTC
+    volumes:
+      - jitsi_jicofo_config:/config
+    networks:
+      - jitsi
+
+  # ── JVB (video bridge) ───────────────────────────────────────────────────────
+  jvb:
+    image: jitsi/jvb:stable
+    container_name: jitsi-jvb
+    restart: unless-stopped
+    depends_on:
+      - prosody
+    ports:
+      - "10000:10000/udp"   # media UDP — must be reachable by clients
+    environment:
+      - XMPP_SERVER=prosody
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=${JITSI_SECRET}
+      - JVB_BREWERY_MUC=jvbbrewery
+      - DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
+      - TZ=UTC
+    volumes:
+      - jitsi_jvb_config:/config
+    networks:
+      - jitsi
+
+volumes:
+  jitsi_web_config:
+  jitsi_prosody_config:
+  jitsi_prosody_plugins:
+  jitsi_jicofo_config:
+  jitsi_jvb_config:
+
+networks:
+  jitsi:
+    driver: bridge
+
